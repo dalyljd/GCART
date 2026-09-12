@@ -61,6 +61,9 @@ export default function Home() {
       });
 
     loadTrips();
+
+    const interval = setInterval(loadTrips, 5000);
+    return () => clearInterval(interval);
   }, [profile]);
 
   function loadTrips() {
@@ -151,226 +154,308 @@ export default function Home() {
   const selectedDepartureLocation = locations.find((l) => l.id === departureLocationId);
   const selectedDestinationLocation = locations.find((l) => l.id === destinationLocationId);
 
-  // ---- Render states ----
+  const TEN_MINUTES_MS = 10 * 60 * 1000;
+
+  function effectiveStatus(trip) {
+    if (trip.status === 'cancelled') return 'cancelled';
+    const departureMs = new Date(trip.departure_time).getTime();
+    if (Date.now() >= departureMs) return 'departed';
+    return trip.status; // 'boarding' or 'full'
+  }
+
+  function shouldShowOnBoard(trip) {
+    if (trip.status === 'cancelled') return false;
+    const departureMs = new Date(trip.departure_time).getTime();
+    return Date.now() < departureMs + TEN_MINUTES_MS;
+  }
 
   if (session === undefined) {
-    return <p>Loading...</p>;
+    return (
+      <div className="page">
+        <p className="section-label">Loading</p>
+      </div>
+    );
   }
 
   if (!session) {
     return (
-      <div>
-        <h1>G-CART</h1>
-        <p>Gonzaga Crew Athlete Routing &amp; Transit</p>
+      <div className="page">
+        <div className="masthead">
+          <div>
+            <h1>G-CART</h1>
+            <p>Gonzaga Crew Athlete Routing &amp; Transit</p>
+          </div>
+        </div>
         <button onClick={signIn}>Sign in with Google</button>
       </div>
     );
   }
 
   if (!profile) {
-    return <p>Loading your profile...</p>;
-  }
-
-  if (!profile.is_approved) {
     return (
-      <div>
-        <h1>G-CART</h1>
-        <p>
-          You're signed in as {profile.email}, but your account hasn't been approved yet.
-          Let your team admin know so they can approve you.
-        </p>
-        <button onClick={signOut}>Sign out</button>
+      <div className="page">
+        <p className="section-label">Loading your profile</p>
       </div>
     );
   }
 
+  if (!profile.is_approved) {
+    return (
+      <div className="page">
+        <div className="masthead">
+          <div>
+            <h1>G-CART</h1>
+            <p>Gonzaga Crew Athlete Routing &amp; Transit</p>
+          </div>
+        </div>
+        <p>
+          You're signed in as {profile.email}, but your account hasn't been approved yet.
+          Let your team admin know so they can approve you.
+        </p>
+        <button className="secondary" onClick={signOut}>
+          Sign out
+        </button>
+      </div>
+    );
+  }
+
+  const visibleTrips = trips.filter(shouldShowOnBoard);
+
   return (
-    <div>
-      <h1>G-CART</h1>
-      <p>
-        Signed in as {profile.full_name || profile.email}{' '}
-        {profile.is_admin ? '(admin)' : ''} — <button onClick={signOut}>Sign out</button>
-      </p>
+    <div className="page">
+      <div className="masthead">
+        <div>
+          <h1>G-CART</h1>
+          <p>Gonzaga Crew Athlete Routing &amp; Transit</p>
+        </div>
+        <div className="who">
+          <div>
+            {profile.full_name || profile.email}
+            {profile.is_admin ? ' · admin' : ''}
+          </div>
+          <button className="secondary" onClick={signOut}>
+            Sign out
+          </button>
+        </div>
+      </div>
 
-      {errorMsg && <p style={{ color: 'red' }}>Error: {errorMsg}</p>}
+      {errorMsg && <div className="error-banner">{errorMsg}</div>}
 
-      <h2>Departure Board (raw list — styling comes later)</h2>
+      <p className="section-label">Departures</p>
 
-      {trips.length === 0 && <p>No trips posted yet.</p>}
+      <div className="board">
+        {visibleTrips.length === 0 && <div className="empty-state">No trips posted yet.</div>}
 
-      {trips.map((t) => {
-        const confirmed = t.reservations.filter((r) => !r.is_waitlisted);
-        const waitlisted = [...t.reservations]
-          .filter((r) => r.is_waitlisted)
-          .sort((a, b) => a.waitlist_position - b.waitlist_position);
+        {visibleTrips.map((t) => {
+          const status = effectiveStatus(t);
+          const confirmed = t.reservations.filter((r) => !r.is_waitlisted);
+          const waitlisted = [...t.reservations]
+            .filter((r) => r.is_waitlisted)
+            .sort((a, b) => a.waitlist_position - b.waitlist_position);
 
-        const holdFulfilled =
-          t.held_seat_email &&
-          confirmed.some((r) => r.passenger?.email === t.held_seat_email);
-        const holdActive = t.held_seat_email && !holdFulfilled;
+          const holdFulfilled =
+            t.held_seat_email && confirmed.some((r) => r.passenger?.email === t.held_seat_email);
+          const holdActive = t.held_seat_email && !holdFulfilled;
 
-        const seatsUsed = confirmed.length + (holdActive ? 1 : 0);
-        const seatsOpen = Math.max(t.seats_total - seatsUsed, 0);
+          const seatsUsed = confirmed.length + (holdActive ? 1 : 0);
+          const seatsOpen = Math.max(t.seats_total - seatsUsed, 0);
 
-        const myReservation = t.reservations.find((r) => r.passenger_id === session.user.id);
-        const isDriver = t.driver_id === session.user.id;
+          const myReservation = t.reservations.find((r) => r.passenger_id === session.user.id);
+          const isDriver = t.driver_id === session.user.id;
 
-        return (
-          <div key={t.id} style={{ border: '1px solid #999', padding: '10px', marginBottom: '12px' }}>
-            <div>
-              <strong>{new Date(t.departure_time).toLocaleString()}</strong> —{' '}
-              {t.departure_location?.name === 'Other'
-                ? t.departure_location_custom
-                : t.departure_location?.name}
-              {t.departure_spot_number ? ` (Spot ${t.departure_spot_number})` : ''} →{' '}
-              {t.destination_location?.name === 'Other'
-                ? t.destination_location_custom
-                : t.destination_location?.name}
+          const fromName =
+            t.departure_location?.name === 'Other'
+              ? t.departure_location_custom
+              : t.departure_location?.name;
+          const toName =
+            t.destination_location?.name === 'Other'
+              ? t.destination_location_custom
+              : t.destination_location?.name;
+
+          return (
+            <div className={`row${status === 'departed' ? ' departed' : ''}`} key={t.id}>
+              <div className="time">
+                {new Date(t.departure_time).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}
+              </div>
+              <div className="route">
+                {fromName}
+                {t.departure_spot_number ? ` (Spot ${t.departure_spot_number})` : ''}
+                <span className="arrow">→</span>
+                {toName}
+              </div>
+              <div className={`flap ${status}`}>{status}</div>
+
+              <div className="meta-line">
+                <span>
+                  Driver: <strong>{t.driver?.full_name || t.driver?.email}</strong>
+                </span>
+                <span>
+                  Seats: <strong>{seatsOpen}</strong> / {t.seats_total}
+                </span>
+                {t.notes && <span>Notes: {t.notes}</span>}
+              </div>
+
+              <div className="meta-line">
+                <span>
+                  Passengers:{' '}
+                  {confirmed.length === 0
+                    ? 'none yet'
+                    : confirmed.map((r) => r.passenger?.full_name || r.passenger?.email).join(', ')}
+                  {holdActive && ` (+1 held for ${t.held_seat_email})`}
+                </span>
+              </div>
+
+              {waitlisted.length > 0 && (
+                <div className="meta-line">
+                  <span>
+                    Waitlist:{' '}
+                    {waitlisted
+                      .map(
+                        (r) => `${r.passenger?.full_name || r.passenger?.email} (#${r.waitlist_position})`
+                      )
+                      .join(', ')}
+                  </span>
+                </div>
+              )}
+
+              {!isDriver && !myReservation && status !== 'departed' && status !== 'cancelled' && (
+                <div className="action-line">
+                  <button onClick={() => reserveSeat(t.id)}>
+                    {seatsOpen > 0 ? 'Reserve a seat' : 'Join waitlist'}
+                  </button>
+                </div>
+              )}
+
+              {!isDriver && myReservation && (
+                <div className="action-line">
+                  <span>
+                    {myReservation.is_waitlisted
+                      ? `You're #${myReservation.waitlist_position} on the waitlist`
+                      : 'You have a seat'}
+                  </span>
+                  <button className="secondary" onClick={() => cancelSeat(t.id)}>
+                    Cancel my spot
+                  </button>
+                </div>
+              )}
+
+              {isDriver && (
+                <div className="hold-editor">
+                  <label>Hold one seat for (email):</label>
+                  <input
+                    value={holdEdits[t.id] ?? t.held_seat_email ?? ''}
+                    onChange={(e) => setHoldEdits((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                  />
+                  <button
+                    className="secondary"
+                    onClick={() => updateHeldSeat(t.id, holdEdits[t.id] ?? t.held_seat_email ?? '')}
+                  >
+                    Save
+                  </button>
+                </div>
+              )}
             </div>
-            <div>
-              Driver: {t.driver?.full_name || t.driver?.email} | Status: {t.status} | Seats
-              open: {seatsOpen} / {t.seats_total}
-            </div>
-            {t.notes && <div>Notes: {t.notes}</div>}
+          );
+        })}
+      </div>
 
-            <div>
-              Passengers:{' '}
-              {confirmed.length === 0
-                ? 'none yet'
-                : confirmed.map((r) => r.passenger?.full_name || r.passenger?.email).join(', ')}
-              {holdActive && ` (+1 seat held for ${t.held_seat_email})`}
+      <div className="form-panel">
+        <p className="section-label">Post a trip</p>
+        <form onSubmit={createTrip}>
+          <div className="form-grid">
+            <div className="field">
+              <label>Departure time</label>
+              <input
+                type="datetime-local"
+                value={departureTime}
+                onChange={(e) => setDepartureTime(e.target.value)}
+                required
+              />
+            </div>
+            <div className="field">
+              <label>Seats available</label>
+              <input
+                type="number"
+                min="1"
+                value={seatsTotal}
+                onChange={(e) => setSeatsTotal(e.target.value)}
+                required
+              />
             </div>
 
-            {waitlisted.length > 0 && (
-              <div>
-                Waitlist:{' '}
-                {waitlisted
-                  .map((r) => `${r.passenger?.full_name || r.passenger?.email} (#${r.waitlist_position})`)
-                  .join(', ')}
+            <div className="field">
+              <label>Departure location</label>
+              <select
+                value={departureLocationId}
+                onChange={(e) => setDepartureLocationId(e.target.value)}
+                required
+              >
+                <option value="">-- choose --</option>
+                {locations.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label>Destination</label>
+              <select
+                value={destinationLocationId}
+                onChange={(e) => setDestinationLocationId(e.target.value)}
+                required
+              >
+                <option value="">-- choose --</option>
+                {locations.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {selectedDepartureLocation?.needs_spot_number && (
+              <div className="field">
+                <label>Spot #</label>
+                <input value={spotNumber} onChange={(e) => setSpotNumber(e.target.value)} />
               </div>
             )}
-
-            {/* Reserve / cancel controls for the signed-in user */}
-            {!isDriver && !myReservation && t.status !== 'departed' && t.status !== 'cancelled' && (
-              <button onClick={() => reserveSeat(t.id)}>
-                {seatsOpen > 0 ? 'Reserve a seat' : 'Join waitlist'}
-              </button>
-            )}
-            {!isDriver && myReservation && (
-              <div>
-                {myReservation.is_waitlisted
-                  ? `You're #${myReservation.waitlist_position} on the waitlist. `
-                  : "You have a seat. "}
-                <button onClick={() => cancelSeat(t.id)}>Cancel my spot</button>
-              </div>
-            )}
-
-            {/* Driver-only: manage the held seat */}
-            {isDriver && (
-              <div>
-                <label>Hold one seat for (email): </label>
+            {selectedDepartureLocation?.name === 'Other' && (
+              <div className="field">
+                <label>Departure location (describe)</label>
                 <input
-                  value={holdEdits[t.id] ?? t.held_seat_email ?? ''}
-                  onChange={(e) =>
-                    setHoldEdits((prev) => ({ ...prev, [t.id]: e.target.value }))
-                  }
+                  value={customDepartureText}
+                  onChange={(e) => setCustomDepartureText(e.target.value)}
+                  required
                 />
-                <button onClick={() => updateHeldSeat(t.id, holdEdits[t.id] ?? t.held_seat_email ?? '')}>
-                  Save hold
-                </button>
               </div>
             )}
-          </div>
-        );
-      })}
+            {selectedDestinationLocation?.name === 'Other' && (
+              <div className="field">
+                <label>Destination (describe)</label>
+                <input
+                  value={customDestinationText}
+                  onChange={(e) => setCustomDestinationText(e.target.value)}
+                  required
+                />
+              </div>
+            )}
 
-      <h2>Post a trip</h2>
-      <form onSubmit={createTrip}>
-        <div>
-          <label>Departure time: </label>
-          <input
-            type="datetime-local"
-            value={departureTime}
-            onChange={(e) => setDepartureTime(e.target.value)}
-            required
-          />
-        </div>
-        <div>
-          <label>Departure location: </label>
-          <select
-            value={departureLocationId}
-            onChange={(e) => setDepartureLocationId(e.target.value)}
-            required
-          >
-            <option value="">-- choose --</option>
-            {locations.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        {selectedDepartureLocation?.needs_spot_number && (
-          <div>
-            <label>Spot #: </label>
-            <input value={spotNumber} onChange={(e) => setSpotNumber(e.target.value)} />
+            <div className="field">
+              <label>Notes</label>
+              <input value={notes} onChange={(e) => setNotes(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Hold one seat for (email, optional)</label>
+              <input value={holdEmail} onChange={(e) => setHoldEmail(e.target.value)} />
+            </div>
           </div>
-        )}
-        {selectedDepartureLocation?.name === 'Other' && (
-          <div>
-            <label>Departure location (describe): </label>
-            <input
-              value={customDepartureText}
-              onChange={(e) => setCustomDepartureText(e.target.value)}
-              required
-            />
-          </div>
-        )}
-        <div>
-          <label>Destination: </label>
-          <select
-            value={destinationLocationId}
-            onChange={(e) => setDestinationLocationId(e.target.value)}
-            required
-          >
-            <option value="">-- choose --</option>
-            {locations.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        {selectedDestinationLocation?.name === 'Other' && (
-          <div>
-            <label>Destination (describe): </label>
-            <input
-              value={customDestinationText}
-              onChange={(e) => setCustomDestinationText(e.target.value)}
-              required
-            />
-          </div>
-        )}
-        <div>
-          <label>Seats available: </label>
-          <input
-            type="number"
-            min="1"
-            value={seatsTotal}
-            onChange={(e) => setSeatsTotal(e.target.value)}
-            required
-          />
-        </div>
-        <div>
-          <label>Notes: </label>
-          <input value={notes} onChange={(e) => setNotes(e.target.value)} />
-        </div>
-        <div>
-          <label>Hold one seat for (email, optional): </label>
-          <input value={holdEmail} onChange={(e) => setHoldEmail(e.target.value)} />
-        </div>
-        <button type="submit">Post trip</button>
-      </form>
+          <button type="submit">Post trip</button>
+        </form>
+      </div>
     </div>
   );
 }

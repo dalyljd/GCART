@@ -17,6 +17,10 @@ export default function Home() {
   const [destinationLocationId, setDestinationLocationId] = useState('');
   const [seatsTotal, setSeatsTotal] = useState(3);
   const [notes, setNotes] = useState('');
+  const [holdEmail, setHoldEmail] = useState('');
+
+  // Per-trip "edit held seat" input state, keyed by trip id
+  const [holdEdits, setHoldEdits] = useState({});
 
   // Watch auth state
   useEffect(() => {
@@ -61,16 +65,42 @@ export default function Home() {
     supabase
       .from('trips')
       .select(
-        `id, departure_time, departure_spot_number, seats_total, notes, status,
+        `id, departure_time, departure_spot_number, seats_total, notes, status, held_seat_email, driver_id,
          driver:profiles!trips_driver_id_fkey ( full_name, email ),
          departure_location:locations!trips_departure_location_id_fkey ( name, needs_spot_number ),
-         destination_location:locations!trips_destination_location_id_fkey ( name )`
+         destination_location:locations!trips_destination_location_id_fkey ( name ),
+         reservations ( id, is_waitlisted, waitlist_position, passenger_id,
+           passenger:profiles!reservations_passenger_id_fkey ( full_name, email ) )`
       )
       .order('departure_time', { ascending: true })
       .then(({ data, error }) => {
         if (error) setErrorMsg(error.message);
         else setTrips(data);
       });
+  }
+
+  async function reserveSeat(tripId) {
+    setErrorMsg('');
+    const { error } = await supabase.rpc('reserve_seat', { p_trip_id: tripId });
+    if (error) setErrorMsg(error.message);
+    else loadTrips();
+  }
+
+  async function cancelSeat(tripId) {
+    setErrorMsg('');
+    const { error } = await supabase.rpc('cancel_seat', { p_trip_id: tripId });
+    if (error) setErrorMsg(error.message);
+    else loadTrips();
+  }
+
+  async function updateHeldSeat(tripId, email) {
+    setErrorMsg('');
+    const { error } = await supabase.rpc('set_held_seat', {
+      p_trip_id: tripId,
+      p_email: email,
+    });
+    if (error) setErrorMsg(error.message);
+    else loadTrips();
   }
 
   async function signIn() {
@@ -93,6 +123,7 @@ export default function Home() {
       destination_location_id: destinationLocationId,
       seats_total: Number(seatsTotal),
       notes: notes || null,
+      held_seat_email: holdEmail || null,
     });
     if (error) {
       setErrorMsg(error.message);
@@ -103,6 +134,7 @@ export default function Home() {
       setDestinationLocationId('');
       setSeatsTotal(3);
       setNotes('');
+      setHoldEmail('');
       loadTrips();
     }
   }
@@ -153,40 +185,90 @@ export default function Home() {
       {errorMsg && <p style={{ color: 'red' }}>Error: {errorMsg}</p>}
 
       <h2>Departure Board (raw list — styling comes later)</h2>
-      <table border="1" cellPadding="6">
-        <thead>
-          <tr>
-            <th>Departs</th>
-            <th>From</th>
-            <th>To</th>
-            <th>Driver</th>
-            <th>Seats</th>
-            <th>Status</th>
-            <th>Notes</th>
-          </tr>
-        </thead>
-        <tbody>
-          {trips.map((t) => (
-            <tr key={t.id}>
-              <td>{new Date(t.departure_time).toLocaleString()}</td>
-              <td>
-                {t.departure_location?.name}
-                {t.departure_spot_number ? ` (Spot ${t.departure_spot_number})` : ''}
-              </td>
-              <td>{t.destination_location?.name}</td>
-              <td>{t.driver?.full_name || t.driver?.email}</td>
-              <td>{t.seats_total}</td>
-              <td>{t.status}</td>
-              <td>{t.notes}</td>
-            </tr>
-          ))}
-          {trips.length === 0 && (
-            <tr>
-              <td colSpan="7">No trips posted yet.</td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+
+      {trips.length === 0 && <p>No trips posted yet.</p>}
+
+      {trips.map((t) => {
+        const confirmed = t.reservations.filter((r) => !r.is_waitlisted);
+        const waitlisted = [...t.reservations]
+          .filter((r) => r.is_waitlisted)
+          .sort((a, b) => a.waitlist_position - b.waitlist_position);
+
+        const holdFulfilled =
+          t.held_seat_email &&
+          confirmed.some((r) => r.passenger?.email === t.held_seat_email);
+        const holdActive = t.held_seat_email && !holdFulfilled;
+
+        const seatsUsed = confirmed.length + (holdActive ? 1 : 0);
+        const seatsOpen = Math.max(t.seats_total - seatsUsed, 0);
+
+        const myReservation = t.reservations.find((r) => r.passenger_id === session.user.id);
+        const isDriver = t.driver_id === session.user.id;
+
+        return (
+          <div key={t.id} style={{ border: '1px solid #999', padding: '10px', marginBottom: '12px' }}>
+            <div>
+              <strong>{new Date(t.departure_time).toLocaleString()}</strong> —{' '}
+              {t.departure_location?.name}
+              {t.departure_spot_number ? ` (Spot ${t.departure_spot_number})` : ''} →{' '}
+              {t.destination_location?.name}
+            </div>
+            <div>
+              Driver: {t.driver?.full_name || t.driver?.email} | Status: {t.status} | Seats
+              open: {seatsOpen} / {t.seats_total}
+            </div>
+            {t.notes && <div>Notes: {t.notes}</div>}
+
+            <div>
+              Passengers:{' '}
+              {confirmed.length === 0
+                ? 'none yet'
+                : confirmed.map((r) => r.passenger?.full_name || r.passenger?.email).join(', ')}
+              {holdActive && ` (+1 seat held for ${t.held_seat_email})`}
+            </div>
+
+            {waitlisted.length > 0 && (
+              <div>
+                Waitlist:{' '}
+                {waitlisted
+                  .map((r) => `${r.passenger?.full_name || r.passenger?.email} (#${r.waitlist_position})`)
+                  .join(', ')}
+              </div>
+            )}
+
+            {/* Reserve / cancel controls for the signed-in user */}
+            {!isDriver && !myReservation && t.status !== 'departed' && t.status !== 'cancelled' && (
+              <button onClick={() => reserveSeat(t.id)}>
+                {seatsOpen > 0 ? 'Reserve a seat' : 'Join waitlist'}
+              </button>
+            )}
+            {!isDriver && myReservation && (
+              <div>
+                {myReservation.is_waitlisted
+                  ? `You're #${myReservation.waitlist_position} on the waitlist. `
+                  : "You have a seat. "}
+                <button onClick={() => cancelSeat(t.id)}>Cancel my spot</button>
+              </div>
+            )}
+
+            {/* Driver-only: manage the held seat */}
+            {isDriver && (
+              <div>
+                <label>Hold one seat for (email): </label>
+                <input
+                  value={holdEdits[t.id] ?? t.held_seat_email ?? ''}
+                  onChange={(e) =>
+                    setHoldEdits((prev) => ({ ...prev, [t.id]: e.target.value }))
+                  }
+                />
+                <button onClick={() => updateHeldSeat(t.id, holdEdits[t.id] ?? t.held_seat_email ?? '')}>
+                  Save hold
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
 
       <h2>Post a trip</h2>
       <form onSubmit={createTrip}>
@@ -248,6 +330,10 @@ export default function Home() {
         <div>
           <label>Notes: </label>
           <input value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </div>
+        <div>
+          <label>Hold one seat for (email, optional): </label>
+          <input value={holdEmail} onChange={(e) => setHoldEmail(e.target.value)} />
         </div>
         <button type="submit">Post trip</button>
       </form>

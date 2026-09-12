@@ -18,6 +18,8 @@ export default function Home() {
   const [seatsTotal, setSeatsTotal] = useState(3);
   const [notes, setNotes] = useState('');
   const [holdEmail, setHoldEmail] = useState('');
+  const [customDepartureText, setCustomDepartureText] = useState('');
+  const [customDestinationText, setCustomDestinationText] = useState('');
 
   // Per-trip "edit held seat" input state, keyed by trip id
   const [holdEdits, setHoldEdits] = useState({});
@@ -66,6 +68,7 @@ export default function Home() {
       .from('trips')
       .select(
         `id, departure_time, departure_spot_number, seats_total, notes, status, held_seat_email, driver_id,
+         departure_location_custom, destination_location_custom,
          driver:profiles!trips_driver_id_fkey ( full_name, email ),
          departure_location:locations!trips_departure_location_id_fkey ( name, needs_spot_number ),
          destination_location:locations!trips_destination_location_id_fkey ( name ),
@@ -124,6 +127,10 @@ export default function Home() {
       seats_total: Number(seatsTotal),
       notes: notes || null,
       held_seat_email: holdEmail || null,
+      departure_location_custom:
+        selectedDepartureLocation?.name === 'Other' ? customDepartureText : null,
+      destination_location_custom:
+        selectedDestinationLocation?.name === 'Other' ? customDestinationText : null,
     });
     if (error) {
       setErrorMsg(error.message);
@@ -135,11 +142,14 @@ export default function Home() {
       setSeatsTotal(3);
       setNotes('');
       setHoldEmail('');
+      setCustomDepartureText('');
+      setCustomDestinationText('');
       loadTrips();
     }
   }
 
   const selectedDepartureLocation = locations.find((l) => l.id === departureLocationId);
+  const selectedDestinationLocation = locations.find((l) => l.id === destinationLocationId);
 
   // ---- Render states ----
 
@@ -209,9 +219,13 @@ export default function Home() {
           <div key={t.id} style={{ border: '1px solid #999', padding: '10px', marginBottom: '12px' }}>
             <div>
               <strong>{new Date(t.departure_time).toLocaleString()}</strong> —{' '}
-              {t.departure_location?.name}
+              {t.departure_location?.name === 'Other'
+                ? t.departure_location_custom
+                : t.departure_location?.name}
               {t.departure_spot_number ? ` (Spot ${t.departure_spot_number})` : ''} →{' '}
-              {t.destination_location?.name}
+              {t.destination_location?.name === 'Other'
+                ? t.destination_location_custom
+                : t.destination_location?.name}
             </div>
             <div>
               Driver: {t.driver?.full_name || t.driver?.email} | Status: {t.status} | Seats
@@ -302,6 +316,16 @@ export default function Home() {
             <input value={spotNumber} onChange={(e) => setSpotNumber(e.target.value)} />
           </div>
         )}
+        {selectedDepartureLocation?.name === 'Other' && (
+          <div>
+            <label>Departure location (describe): </label>
+            <input
+              value={customDepartureText}
+              onChange={(e) => setCustomDepartureText(e.target.value)}
+              required
+            />
+          </div>
+        )}
         <div>
           <label>Destination: </label>
           <select
@@ -317,6 +341,16 @@ export default function Home() {
             ))}
           </select>
         </div>
+        {selectedDestinationLocation?.name === 'Other' && (
+          <div>
+            <label>Destination (describe): </label>
+            <input
+              value={customDestinationText}
+              onChange={(e) => setCustomDestinationText(e.target.value)}
+              required
+            />
+          </div>
+        )}
         <div>
           <label>Seats available: </label>
           <input

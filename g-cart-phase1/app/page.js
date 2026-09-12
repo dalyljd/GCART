@@ -85,18 +85,77 @@ export default function Home() {
       });
   }
 
-  async function reserveSeat(tripId) {
-    setErrorMsg('');
-    const { error } = await supabase.rpc('reserve_seat', { p_trip_id: tripId });
-    if (error) setErrorMsg(error.message);
-    else loadTrips();
+  async function sendNotification(type, recipients, data) {
+    if (!recipients.length) return;
+    try {
+      await fetch('/api/notify', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ type, recipients, data }),
+      });
+    } catch (e) {
+      // Notification failures shouldn't block the reservation itself —
+      // just log it so we can debug later.
+      console.error('notification failed', e);
+    }
   }
 
-  async function cancelSeat(tripId) {
+  async function reserveSeat(tripId, driverEmail, destination) {
     setErrorMsg('');
-    const { error } = await supabase.rpc('cancel_seat', { p_trip_id: tripId });
-    if (error) setErrorMsg(error.message);
-    else loadTrips();
+    const { data, error } = await supabase.rpc('reserve_seat', { p_trip_id: tripId });
+    if (error) {
+      setErrorMsg(error.message);
+      return;
+    }
+    loadTrips();
+    if (!data.waitlisted) {
+      await sendNotification('seat_joined', [driverEmail], {
+        passengerName: data.passenger_name,
+        departureTime: data.departure_time,
+        destination,
+      });
+    }
+    if (data.became_full) {
+      await sendNotification('car_full', [driverEmail], {
+        departureTime: data.departure_time,
+        destination,
+      });
+    }
+  }
+
+  async function cancelSeat(tripId, destination) {
+    setErrorMsg('');
+    const { data, error } = await supabase.rpc('cancel_seat', { p_trip_id: tripId });
+    if (error) {
+      setErrorMsg(error.message);
+      return;
+    }
+    loadTrips();
+    if (data.promoted_email) {
+      await sendNotification('waitlist_promoted', [data.promoted_email], {
+        departureTime: data.departure_time,
+        destination,
+      });
+    }
+  }
+
+  async function cancelTrip(trip, destination) {
+    setErrorMsg('');
+    const affectedEmails = trip.reservations.map((r) => r.passenger?.email).filter(Boolean);
+    const { error } = await supabase.from('trips').update({ status: 'cancelled' }).eq('id', trip.id);
+    if (error) {
+      setErrorMsg(error.message);
+      return;
+    }
+    loadTrips();
+    await sendNotification('trip_cancelled', affectedEmails, {
+      driverName: profile.full_name || profile.email,
+      departureTime: trip.departure_time,
+      destination,
+    });
   }
 
   async function updateHeldSeat(tripId, email) {
@@ -123,7 +182,7 @@ export default function Home() {
     setErrorMsg('');
     const { error } = await supabase.from('trips').insert({
       driver_id: session.user.id,
-      departure_time: departureTime,
+      departure_time: new Date(departureTime).toISOString(),
       departure_location_id: departureLocationId,
       departure_spot_number: spotNumber || null,
       destination_location_id: destinationLocationId,
@@ -323,7 +382,7 @@ export default function Home() {
 
               {!isDriver && !myReservation && status !== 'departed' && status !== 'cancelled' && (
                 <div className="action-line">
-                  <button onClick={() => reserveSeat(t.id)}>
+                  <button onClick={() => reserveSeat(t.id, t.driver?.email, toName)}>
                     {seatsOpen > 0 ? 'Reserve a seat' : 'Join waitlist'}
                   </button>
                 </div>
@@ -336,8 +395,16 @@ export default function Home() {
                       ? `You're #${myReservation.waitlist_position} on the waitlist`
                       : 'You have a seat'}
                   </span>
-                  <button className="secondary" onClick={() => cancelSeat(t.id)}>
+                  <button className="secondary" onClick={() => cancelSeat(t.id, toName)}>
                     Cancel my spot
+                  </button>
+                </div>
+              )}
+
+              {isDriver && status !== 'departed' && status !== 'cancelled' && (
+                <div className="action-line">
+                  <button className="secondary" onClick={() => cancelTrip(t, toName)}>
+                    Cancel this trip
                   </button>
                 </div>
               )}

@@ -96,6 +96,12 @@ button:hover {
   filter: brightness(1.08);
 }
 
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: none;
+}
+
 input,
 select {
   background: var(--panel-alt);
@@ -105,6 +111,11 @@ select {
   padding: 0.45rem 0.6rem;
   font-family: var(--sans);
   font-size: 0.9rem;
+}
+
+input[type='datetime-local'],
+input[type='date'] {
+  color-scheme: light;
 }
 
 .board {
@@ -246,6 +257,16 @@ select {
   background: rgba(226, 96, 122, 0.12);
   border: 1px solid rgba(226, 96, 122, 0.35);
   color: var(--red);
+  padding: 0.7rem 0.9rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  margin-bottom: 1.5rem;
+}
+
+.notice-banner {
+  background: var(--violet-soft);
+  border: 1px solid rgba(185, 140, 255, 0.35);
+  color: var(--violet);
   padding: 0.7rem 0.9rem;
   border-radius: 4px;
   font-size: 0.85rem;

@@ -9,6 +9,7 @@ export default function Home() {
   const [locations, setLocations] = useState([]);
   const [trips, setTrips] = useState([]);
   const [errorMsg, setErrorMsg] = useState('');
+  const [noticeMsg, setNoticeMsg] = useState('');
 
   // Form state
   const [departureTime, setDepartureTime] = useState('');
@@ -25,6 +26,10 @@ export default function Home() {
   const [allProfiles, setAllProfiles] = useState([]);
   const [newLocationName, setNewLocationName] = useState('');
   const [newLocationNeedsSpot, setNewLocationNeedsSpot] = useState(false);
+  const [lateCounts, setLateCounts] = useState({}); // passenger_id -> count
+
+  // Per-trip "edit departure time" input state, keyed by trip id
+  const [timeEdits, setTimeEdits] = useState({});
 
   // Per-trip "edit held seat" input state, keyed by trip id
   const [holdEdits, setHoldEdits] = useState({});
@@ -74,7 +79,22 @@ export default function Home() {
   useEffect(() => {
     if (!profile?.is_admin) return;
     loadProfiles();
+    loadLateCounts();
   }, [profile]);
+
+  function loadLateCounts() {
+    supabase
+      .from('late_reports')
+      .select('passenger_id')
+      .then(({ data, error }) => {
+        if (error) return;
+        const counts = {};
+        data.forEach((r) => {
+          counts[r.passenger_id] = (counts[r.passenger_id] || 0) + 1;
+        });
+        setLateCounts(counts);
+      });
+  }
 
   function loadProfiles() {
     supabase
@@ -91,13 +111,14 @@ export default function Home() {
     supabase
       .from('trips')
       .select(
-        `id, departure_time, departure_spot_number, seats_total, notes, status, held_seat_email, driver_id,
+        `id, departure_time, original_departure_time, departure_spot_number, seats_total, notes, status, held_seat_email, driver_id,
          departure_location_custom, destination_location_custom,
          driver:profiles!trips_driver_id_fkey ( full_name, email ),
          departure_location:locations!trips_departure_location_id_fkey ( name, needs_spot_number ),
          destination_location:locations!trips_destination_location_id_fkey ( name ),
-         reservations ( id, is_waitlisted, waitlist_position, passenger_id,
-           passenger:profiles!reservations_passenger_id_fkey ( full_name, email ) )`
+         reservations ( id, is_waitlisted, waitlist_position, is_priority, passenger_id,
+           passenger:profiles!reservations_passenger_id_fkey ( id, full_name, email ) ),
+         late_reports ( passenger_id )`
       )
       .order('departure_time', { ascending: true })
       .then(({ data, error }) => {
@@ -126,12 +147,19 @@ export default function Home() {
 
   async function reserveSeat(tripId, driverEmail, destination) {
     setErrorMsg('');
+    setNoticeMsg('');
     const { data, error } = await supabase.rpc('reserve_seat', { p_trip_id: tripId });
     if (error) {
       setErrorMsg(error.message);
       return;
     }
     loadTrips();
+    if (data.needed_queued) {
+      setNoticeMsg(
+        "Every car today is full, so you've been added to today's priority queue instead of this trip's waitlist. If a car has room 5 minutes before it leaves, you'll be seated automatically."
+      );
+      return;
+    }
     if (!data.waitlisted) {
       await sendNotification('seat_joined', [driverEmail], {
         passengerName: data.passenger_name,
@@ -205,6 +233,26 @@ export default function Home() {
     else loadProfiles();
   }
 
+  async function toggleNeededIndefinite(targetProfile) {
+    setErrorMsg('');
+    const { error } = await supabase
+      .from('profiles')
+      .update({ needed_early_indefinite: !targetProfile.needed_early_indefinite })
+      .eq('id', targetProfile.id);
+    if (error) setErrorMsg(error.message);
+    else loadProfiles();
+  }
+
+  async function setNeededDate(profileId, dateValue) {
+    setErrorMsg('');
+    const { error } = await supabase
+      .from('profiles')
+      .update({ needed_early_date: dateValue || null })
+      .eq('id', profileId);
+    if (error) setErrorMsg(error.message);
+    else loadProfiles();
+  }
+
   async function addLocation(e) {
     e.preventDefault();
     setErrorMsg('');
@@ -252,6 +300,39 @@ export default function Home() {
     });
     if (error) setErrorMsg(error.message);
     else loadTrips();
+  }
+
+  async function updateDepartureTime(tripId, newLocalValue) {
+    setErrorMsg('');
+    const { error } = await supabase.rpc('update_departure_time', {
+      p_trip_id: tripId,
+      p_new_time: new Date(newLocalValue).toISOString(),
+    });
+    if (error) setErrorMsg(error.message);
+    else loadTrips();
+  }
+
+  async function setPriorityPassenger(tripId, passengerId) {
+    setErrorMsg('');
+    const { error } = await supabase.rpc('set_priority_passenger', {
+      p_trip_id: tripId,
+      p_passenger_id: passengerId,
+    });
+    if (error) setErrorMsg(error.message);
+    else loadTrips();
+  }
+
+  async function reportLate(tripId, passengerId) {
+    setErrorMsg('');
+    const { error } = await supabase.rpc('report_late', {
+      p_trip_id: tripId,
+      p_passenger_id: passengerId,
+    });
+    if (error) setErrorMsg(error.message);
+    else {
+      loadTrips();
+      if (profile.is_admin) loadLateCounts();
+    }
   }
 
   async function signIn() {
@@ -312,6 +393,14 @@ export default function Home() {
     if (trip.status === 'cancelled') return false;
     const departureMs = new Date(trip.departure_time).getTime();
     return Date.now() < departureMs + TEN_MINUTES_MS;
+  }
+
+  function toDatetimeLocalValue(iso) {
+    const d = new Date(iso);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+      d.getHours()
+    )}:${pad(d.getMinutes())}`;
   }
 
   if (session === undefined) {
@@ -385,6 +474,7 @@ export default function Home() {
       </div>
 
       {errorMsg && <div className="error-banner">{errorMsg}</div>}
+      {noticeMsg && <div className="notice-banner">{noticeMsg}</div>}
 
       <p className="section-label">Departures</p>
 
@@ -417,6 +507,19 @@ export default function Home() {
               ? t.destination_location_custom
               : t.destination_location?.name;
 
+          const timeShift =
+            t.departure_time === t.original_departure_time
+              ? null
+              : new Date(t.departure_time) > new Date(t.original_departure_time)
+              ? 'late'
+              : 'early';
+
+          const departureMs = new Date(t.departure_time).getTime();
+          const withinCancelBlackout =
+            myReservation && !myReservation.is_waitlisted && departureMs - Date.now() <= 5 * 60 * 1000;
+
+          const lateReportedIds = new Set(t.late_reports.map((lr) => lr.passenger_id));
+
           return (
             <div className={`row${status === 'departed' ? ' departed' : ''}`} key={t.id}>
               <div className="time">
@@ -424,6 +527,14 @@ export default function Home() {
                   hour: '2-digit',
                   minute: '2-digit',
                 })}
+                {timeShift && (
+                  <span
+                    className={`flap ${timeShift === 'late' ? 'full' : 'boarding'}`}
+                    style={{ marginLeft: '0.4rem', fontSize: '0.65rem' }}
+                  >
+                    {timeShift}
+                  </span>
+                )}
               </div>
               <div className="route">
                 {fromName}
@@ -446,9 +557,36 @@ export default function Home() {
               <div className="meta-line">
                 <span>
                   Passengers:{' '}
-                  {confirmed.length === 0
+                  {confirmed.length === 0 && !holdActive
                     ? 'none yet'
-                    : confirmed.map((r) => r.passenger?.full_name || r.passenger?.email).join(', ')}
+                    : confirmed.map((r, i) => (
+                        <span key={r.id}>
+                          {i > 0 && ', '}
+                          {r.passenger?.full_name || r.passenger?.email}
+                          {r.is_priority && ' ★'}
+                          {lateReportedIds.has(r.passenger_id) && ' (reported late)'}
+                          {isDriver && status !== 'departed' && (
+                            <button
+                              className="secondary"
+                              style={{ marginLeft: '0.3rem', padding: '0.1rem 0.4rem', fontSize: '0.72rem' }}
+                              onClick={() =>
+                                setPriorityPassenger(t.id, r.is_priority ? null : r.passenger_id)
+                              }
+                            >
+                              {r.is_priority ? 'Unmark priority' : 'Mark priority'}
+                            </button>
+                          )}
+                          {isDriver && status === 'departed' && !lateReportedIds.has(r.passenger_id) && (
+                            <button
+                              className="secondary"
+                              style={{ marginLeft: '0.3rem', padding: '0.1rem 0.4rem', fontSize: '0.72rem' }}
+                              onClick={() => reportLate(t.id, r.passenger_id)}
+                            >
+                              Report late
+                            </button>
+                          )}
+                        </span>
+                      ))}
                   {holdActive && ` (+1 held for ${t.held_seat_email})`}
                 </span>
               </div>
@@ -481,8 +619,13 @@ export default function Home() {
                       ? `You're #${myReservation.waitlist_position} on the waitlist`
                       : 'You have a seat'}
                   </span>
-                  <button className="secondary" onClick={() => cancelSeat(t.id, toName)}>
-                    Cancel my spot
+                  <button
+                    className="secondary"
+                    onClick={() => cancelSeat(t.id, toName)}
+                    disabled={withinCancelBlackout}
+                    title={withinCancelBlackout ? 'Too close to departure to cancel' : undefined}
+                  >
+                    {withinCancelBlackout ? "Can't cancel (departing soon)" : 'Cancel my spot'}
                   </button>
                 </div>
               )}
@@ -491,6 +634,25 @@ export default function Home() {
                 <div className="action-line">
                   <button className="secondary" onClick={() => cancelTrip(t, toName)}>
                     {isDriver ? 'Cancel this trip' : 'Cancel this trip (admin)'}
+                  </button>
+                </div>
+              )}
+
+              {isDriver && status !== 'cancelled' && (
+                <div className="hold-editor">
+                  <label>Departure time:</label>
+                  <input
+                    type="datetime-local"
+                    value={timeEdits[t.id] ?? toDatetimeLocalValue(t.departure_time)}
+                    onChange={(e) => setTimeEdits((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                  />
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      updateDepartureTime(t.id, timeEdits[t.id] ?? toDatetimeLocalValue(t.departure_time))
+                    }
+                  >
+                    Save
                   </button>
                 </div>
               )}
@@ -540,22 +702,47 @@ export default function Home() {
           {allProfiles
             .filter((p) => p.is_approved)
             .map((p) => (
-              <div className="action-line" key={p.id} style={{ marginBottom: '0.5rem' }}>
-                <span>
-                  {p.full_name || p.email}
-                  {p.is_admin ? ' · admin' : ''}
-                  {p.id === profile.id ? ' (you)' : ''}
-                </span>
-                {p.id !== profile.id && (
-                  <>
-                    <button className="secondary" onClick={() => revokeUser(p.id)}>
-                      Revoke access
-                    </button>
-                    <button className="secondary" onClick={() => toggleAdmin(p)}>
-                      {p.is_admin ? 'Remove admin' : 'Make admin'}
-                    </button>
-                  </>
-                )}
+              <div key={p.id} style={{ marginBottom: '0.9rem' }}>
+                <div className="action-line">
+                  <span>
+                    {p.full_name || p.email}
+                    {p.is_admin ? ' · admin' : ''}
+                    {p.id === profile.id ? ' (you)' : ''}
+                    {lateCounts[p.id] ? ` · late ${lateCounts[p.id]}x` : ''}
+                    {p.needed_early_indefinite ? ' · needed (always)' : ''}
+                    {p.needed_early_date ? ` · needed on ${p.needed_early_date}` : ''}
+                  </span>
+                  {p.id !== profile.id && (
+                    <>
+                      <button className="secondary" onClick={() => revokeUser(p.id)}>
+                        Revoke access
+                      </button>
+                      <button className="secondary" onClick={() => toggleAdmin(p)}>
+                        {p.is_admin ? 'Remove admin' : 'Make admin'}
+                      </button>
+                    </>
+                  )}
+                </div>
+                <div className="hold-editor" style={{ marginTop: '0.3rem' }}>
+                  <label style={{ fontSize: '0.78rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={p.needed_early_indefinite}
+                      onChange={() => toggleNeededIndefinite(p)}
+                      style={{ width: 'auto', marginRight: '0.3rem' }}
+                    />
+                    Needed early indefinitely
+                  </label>
+                  <input
+                    type="date"
+                    defaultValue={p.needed_early_date || ''}
+                    onBlur={(e) => setNeededDate(p.id, e.target.value)}
+                    style={{ width: 'auto' }}
+                  />
+                  <button className="secondary" onClick={() => setNeededDate(p.id, '')}>
+                    Clear date
+                  </button>
+                </div>
               </div>
             ))}
 

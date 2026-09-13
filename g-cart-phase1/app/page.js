@@ -21,6 +21,11 @@ export default function Home() {
   const [customDepartureText, setCustomDepartureText] = useState('');
   const [customDestinationText, setCustomDestinationText] = useState('');
 
+  // Admin panel state
+  const [allProfiles, setAllProfiles] = useState([]);
+  const [newLocationName, setNewLocationName] = useState('');
+  const [newLocationNeedsSpot, setNewLocationNeedsSpot] = useState(false);
+
   // Per-trip "edit held seat" input state, keyed by trip id
   const [holdEdits, setHoldEdits] = useState({});
 
@@ -65,6 +70,22 @@ export default function Home() {
     const interval = setInterval(loadTrips, 5000);
     return () => clearInterval(interval);
   }, [profile]);
+
+  useEffect(() => {
+    if (!profile?.is_admin) return;
+    loadProfiles();
+  }, [profile]);
+
+  function loadProfiles() {
+    supabase
+      .from('profiles')
+      .select('*')
+      .order('created_at')
+      .then(({ data, error }) => {
+        if (error) setErrorMsg(error.message);
+        else setAllProfiles(data);
+      });
+  }
 
   function loadTrips() {
     supabase
@@ -156,6 +177,71 @@ export default function Home() {
       departureTime: trip.departure_time,
       destination,
     });
+  }
+
+  // ---- Admin actions ----
+
+  async function approveUser(profileId) {
+    setErrorMsg('');
+    const { error } = await supabase.from('profiles').update({ is_approved: true }).eq('id', profileId);
+    if (error) setErrorMsg(error.message);
+    else loadProfiles();
+  }
+
+  async function revokeUser(profileId) {
+    setErrorMsg('');
+    const { error } = await supabase.from('profiles').update({ is_approved: false }).eq('id', profileId);
+    if (error) setErrorMsg(error.message);
+    else loadProfiles();
+  }
+
+  async function toggleAdmin(targetProfile) {
+    setErrorMsg('');
+    const { error } = await supabase
+      .from('profiles')
+      .update({ is_admin: !targetProfile.is_admin })
+      .eq('id', targetProfile.id);
+    if (error) setErrorMsg(error.message);
+    else loadProfiles();
+  }
+
+  async function addLocation(e) {
+    e.preventDefault();
+    setErrorMsg('');
+    if (!newLocationName.trim()) return;
+    const { error } = await supabase
+      .from('locations')
+      .insert({ name: newLocationName.trim(), needs_spot_number: newLocationNeedsSpot });
+    if (error) {
+      setErrorMsg(error.message);
+    } else {
+      setNewLocationName('');
+      setNewLocationNeedsSpot(false);
+      loadTrips(); // locations are refetched as part of this
+      supabase
+        .from('locations')
+        .select('*')
+        .order('name')
+        .then(({ data }) => data && setLocations(data));
+    }
+  }
+
+  async function deleteLocation(locationId) {
+    setErrorMsg('');
+    const { error } = await supabase.from('locations').delete().eq('id', locationId);
+    if (error) {
+      if (error.message.includes('foreign key') || error.code === '23503') {
+        setErrorMsg('This location is used by an existing trip, so it can\'t be deleted.');
+      } else {
+        setErrorMsg(error.message);
+      }
+    } else {
+      supabase
+        .from('locations')
+        .select('*')
+        .order('name')
+        .then(({ data }) => data && setLocations(data));
+    }
   }
 
   async function updateHeldSeat(tripId, email) {
@@ -401,10 +487,10 @@ export default function Home() {
                 </div>
               )}
 
-              {isDriver && status !== 'departed' && status !== 'cancelled' && (
+              {(isDriver || profile.is_admin) && status !== 'departed' && status !== 'cancelled' && (
                 <div className="action-line">
                   <button className="secondary" onClick={() => cancelTrip(t, toName)}>
-                    Cancel this trip
+                    {isDriver ? 'Cancel this trip' : 'Cancel this trip (admin)'}
                   </button>
                 </div>
               )}
@@ -428,6 +514,84 @@ export default function Home() {
           );
         })}
       </div>
+
+      {profile.is_admin && (
+        <div className="form-panel">
+          <p className="section-label">Admin</p>
+
+          <p style={{ color: 'var(--ink-dim)', fontSize: '0.85rem', marginBottom: '0.5rem' }}>
+            Pending approval
+          </p>
+          {allProfiles.filter((p) => !p.is_approved).length === 0 && (
+            <p style={{ color: 'var(--ink-faint)', fontSize: '0.85rem' }}>Nobody waiting.</p>
+          )}
+          {allProfiles
+            .filter((p) => !p.is_approved)
+            .map((p) => (
+              <div className="action-line" key={p.id} style={{ marginBottom: '0.5rem' }}>
+                <span>{p.full_name || p.email}</span>
+                <button onClick={() => approveUser(p.id)}>Approve</button>
+              </div>
+            ))}
+
+          <p style={{ color: 'var(--ink-dim)', fontSize: '0.85rem', margin: '1.5rem 0 0.5rem' }}>
+            Approved members
+          </p>
+          {allProfiles
+            .filter((p) => p.is_approved)
+            .map((p) => (
+              <div className="action-line" key={p.id} style={{ marginBottom: '0.5rem' }}>
+                <span>
+                  {p.full_name || p.email}
+                  {p.is_admin ? ' · admin' : ''}
+                  {p.id === profile.id ? ' (you)' : ''}
+                </span>
+                {p.id !== profile.id && (
+                  <>
+                    <button className="secondary" onClick={() => revokeUser(p.id)}>
+                      Revoke access
+                    </button>
+                    <button className="secondary" onClick={() => toggleAdmin(p)}>
+                      {p.is_admin ? 'Remove admin' : 'Make admin'}
+                    </button>
+                  </>
+                )}
+              </div>
+            ))}
+
+          <p style={{ color: 'var(--ink-dim)', fontSize: '0.85rem', margin: '1.5rem 0 0.5rem' }}>
+            Locations
+          </p>
+          {locations.map((l) => (
+            <div className="action-line" key={l.id} style={{ marginBottom: '0.5rem' }}>
+              <span>
+                {l.name}
+                {l.needs_spot_number ? ' (asks for Spot #)' : ''}
+              </span>
+              <button className="secondary" onClick={() => deleteLocation(l.id)}>
+                Delete
+              </button>
+            </div>
+          ))}
+          <form onSubmit={addLocation} className="action-line" style={{ marginTop: '0.75rem' }}>
+            <input
+              placeholder="New location name"
+              value={newLocationName}
+              onChange={(e) => setNewLocationName(e.target.value)}
+            />
+            <label style={{ fontSize: '0.82rem', color: 'var(--ink-dim)' }}>
+              <input
+                type="checkbox"
+                checked={newLocationNeedsSpot}
+                onChange={(e) => setNewLocationNeedsSpot(e.target.checked)}
+                style={{ width: 'auto', marginRight: '0.3rem' }}
+              />
+              Ask for Spot #
+            </label>
+            <button type="submit">Add location</button>
+          </form>
+        </div>
+      )}
 
       <div className="form-panel">
         <p className="section-label">Post a trip</p>

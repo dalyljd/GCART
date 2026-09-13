@@ -203,8 +203,14 @@ select {
   display: flex;
   gap: 0.5rem;
   align-items: center;
+  flex-wrap: wrap;
   font-size: 0.82rem;
   color: var(--ink-dim);
+}
+
+.hold-editor input {
+  flex: 1 1 160px;
+  min-width: 0;
 }
 
 .form-panel {
@@ -258,5 +264,23 @@ select {
   }
   .who {
     text-align: left;
+  }
+  .page {
+    padding: 1.5rem 1rem 4rem;
+  }
+  .row .time {
+    min-width: 0;
+    font-size: 0.95rem;
+  }
+  .row .route {
+    min-width: 0;
+    flex-basis: 100%;
+  }
+  .action-line,
+  .action-line.row {
+    width: 100%;
+  }
+  .action-line button {
+    flex: 1 1 auto;
   }
 }

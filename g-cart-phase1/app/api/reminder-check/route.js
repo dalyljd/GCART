@@ -71,5 +71,121 @@ export async function GET(request) {
     sentCount++;
   }
 
-  return Response.json({ tripsNotified: sentCount });
+  const bumpCount = await processNeededQueueBumps(now);
+
+  return Response.json({ tripsNotified: sentCount, neededQueueBumps: bumpCount });
+}
+
+const BUMP_WINDOW_MINUTES = 5;
+
+// For every car departing within the next 5 minutes that hasn't been
+// checked yet, see if today's needed-queue has someone still waiting.
+// If so, seat them — using an open seat if one exists, otherwise bumping
+// the most-recently-joined non-priority confirmed passenger to make room.
+async function processNeededQueueBumps(now) {
+  const windowEnd = new Date(now.getTime() + BUMP_WINDOW_MINUTES * 60 * 1000);
+
+  const { data: trips, error } = await supabaseAdmin
+    .from('trips')
+    .select(
+      `id, departure_time, seats_total, held_seat_email, needed_bump_processed, status,
+       destination_location:locations!trips_destination_location_id_fkey ( name ),
+       destination_location_custom,
+       reservations ( id, is_waitlisted, is_priority, created_at, passenger_id,
+         passenger:profiles!reservations_passenger_id_fkey ( email ) )`
+    )
+    .eq('needed_bump_processed', false)
+    .not('status', 'in', '("cancelled","departed")')
+    .gt('departure_time', now.toISOString())
+    .lte('departure_time', windowEnd.toISOString());
+
+  if (error || !trips) return 0;
+
+  let bumped = 0;
+
+  for (const trip of trips) {
+    const queueDate = trip.departure_time.slice(0, 10); // YYYY-MM-DD
+
+    const { data: queueRows } = await supabaseAdmin
+      .from('needed_queue')
+      .select('id, rower_id, profiles:profiles!needed_queue_rower_id_fkey ( email, full_name )')
+      .eq('queue_date', queueDate)
+      .order('created_at', { ascending: true })
+      .limit(1);
+
+    const nextInLine = queueRows?.[0];
+
+    if (!nextInLine) {
+      await supabaseAdmin.from('trips').update({ needed_bump_processed: true }).eq('id', trip.id);
+      continue;
+    }
+
+    const confirmed = trip.reservations.filter((r) => !r.is_waitlisted);
+    const holdActive =
+      trip.held_seat_email &&
+      !confirmed.some((r) => r.passenger?.email === trip.held_seat_email);
+    const hasOpenSeat = confirmed.length + (holdActive ? 1 : 0) < trip.seats_total;
+
+    const destination =
+      trip.destination_location?.name === 'Other'
+        ? trip.destination_location_custom
+        : trip.destination_location?.name;
+
+    if (!hasOpenSeat) {
+      // Need to bump someone: the most-recently-joined confirmed
+      // passenger who is NOT the driver's flagged priority passenger.
+      const bumpCandidates = confirmed
+        .filter((r) => !r.is_priority)
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+      if (bumpCandidates.length === 0) {
+        // Everyone confirmed is protected (e.g. a single-seat car whose
+        // only passenger is the priority pick) — nothing we can do for
+        // this trip. Leave the queue entry for another car to resolve.
+        await supabaseAdmin.from('trips').update({ needed_bump_processed: true }).eq('id', trip.id);
+        continue;
+      }
+
+      const bumpedReservation = bumpCandidates[0];
+      await supabaseAdmin.from('reservations').delete().eq('id', bumpedReservation.id);
+
+      if (bumpedReservation.passenger?.email) {
+        const { subject, html } = buildEmail('bumped_for_needed', {
+          departureTime: trip.departure_time,
+          destination,
+        });
+        await resend.emails.send({
+          from: process.env.NOTIFY_FROM_EMAIL,
+          to: bumpedReservation.passenger.email,
+          subject,
+          html,
+        });
+      }
+    }
+
+    await supabaseAdmin.from('reservations').insert({
+      trip_id: trip.id,
+      passenger_id: nextInLine.rower_id,
+      is_waitlisted: false,
+    });
+    await supabaseAdmin.from('needed_queue').delete().eq('id', nextInLine.id);
+    await supabaseAdmin.from('trips').update({ needed_bump_processed: true }).eq('id', trip.id);
+
+    if (nextInLine.profiles?.email) {
+      const { subject, html } = buildEmail('needed_queue_seated', {
+        departureTime: trip.departure_time,
+        destination,
+      });
+      await resend.emails.send({
+        from: process.env.NOTIFY_FROM_EMAIL,
+        to: nextInLine.profiles.email,
+        subject,
+        html,
+      });
+    }
+
+    bumped++;
+  }
+
+  return bumped;
 }

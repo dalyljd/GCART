@@ -52,6 +52,22 @@ export function buildEmail(type, data) {
         )} — ${data.minutesBefore} minutes from now.</p>`,
       };
 
+    case 'needed_queue_seated':
+      return {
+        subject: `You have a seat — priority queue resolved`,
+        html: `<p>A seat opened up for you on the trip to ${data.destination} departing ${formatTime(
+          data.departureTime
+        )}, since you were marked needed early.</p>`,
+      };
+
+    case 'bumped_for_needed':
+      return {
+        subject: `Your G-CART seat was reassigned`,
+        html: `<p>Your seat on the trip to ${data.destination} departing ${formatTime(
+          data.departureTime
+        )} was given to a rower who needed to arrive early. Please arrange another way to get there (e.g. the bus).</p>`,
+      };
+
     default:
       throw new Error(`Unknown notification type: ${type}`);
   }

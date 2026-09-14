@@ -46,6 +46,14 @@ export function buildEmail(type, data) {
         )} to ${data.destination}. Please find another ride.</p>`,
       };
 
+    case 'time_changed':
+      return {
+        subject: `Your G-CART trip's departure time changed`,
+        html: `<p>The trip you're on to ${data.destination} now departs at ${formatTime(
+          data.departureTime
+        )} (originally ${formatTime(data.originalDepartureTime)}).</p>`,
+      };
+
     case 'departure_reminder':
       return {
         subject: `Reminder: your G-CART trip departs soon`,

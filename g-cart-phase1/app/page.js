@@ -302,14 +302,24 @@ export default function Home() {
     else loadTrips();
   }
 
-  async function updateDepartureTime(tripId, newLocalValue) {
+  async function updateDepartureTime(trip, newLocalValue, destination) {
     setErrorMsg('');
+    const newIso = new Date(newLocalValue).toISOString();
     const { error } = await supabase.rpc('update_departure_time', {
-      p_trip_id: tripId,
-      p_new_time: new Date(newLocalValue).toISOString(),
+      p_trip_id: trip.id,
+      p_new_time: newIso,
     });
-    if (error) setErrorMsg(error.message);
-    else loadTrips();
+    if (error) {
+      setErrorMsg(error.message);
+      return;
+    }
+    loadTrips();
+    const affectedEmails = trip.reservations.map((r) => r.passenger?.email).filter(Boolean);
+    await sendNotification('time_changed', affectedEmails, {
+      destination,
+      departureTime: newIso,
+      originalDepartureTime: trip.departure_time,
+    });
   }
 
   async function setPriorityPassenger(tripId, passengerId) {
@@ -649,7 +659,11 @@ export default function Home() {
                   <button
                     className="secondary"
                     onClick={() =>
-                      updateDepartureTime(t.id, timeEdits[t.id] ?? toDatetimeLocalValue(t.departure_time))
+                      updateDepartureTime(
+                        t,
+                        timeEdits[t.id] ?? toDatetimeLocalValue(t.departure_time),
+                        toName
+                      )
                     }
                   >
                     Save

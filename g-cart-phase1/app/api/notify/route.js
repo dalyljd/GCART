@@ -35,7 +35,7 @@ export async function POST(request) {
     const { subject, html } = buildEmail(type, data);
     const uniqueRecipients = [...new Set(recipients.filter(Boolean))];
 
-    const results = await Promise.all(
+    const results = await Promise.allSettled(
       uniqueRecipients.map((to) =>
         resend.emails.send({
           from: process.env.NOTIFY_FROM_EMAIL,

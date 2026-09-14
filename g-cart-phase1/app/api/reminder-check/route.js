@@ -13,8 +13,6 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const REMINDER_MINUTES_BEFORE = 30;
-
 // Sends one email and never throws — logs the failure and returns false
 // instead, so one flaky send doesn't take down the whole scheduled run.
 async function sendEmailSafe(to, subject, html) {
@@ -44,66 +42,87 @@ export async function GET(request) {
 
   try {
     const now = new Date();
-    const sentCount = await processReminders(now);
+    const sent30 = await processReminderTier(now, 30, 'reminder_sent');
+    const sent10 = await processReminderTier(now, 10, 'reminder_10_sent');
     const bumpCount = await processNeededQueueBumps(now);
-    return Response.json({ tripsNotified: sentCount, neededQueueBumps: bumpCount });
+    return Response.json({
+      tripsNotified30Min: sent30,
+      tripsNotified10Min: sent10,
+      neededQueueBumps: bumpCount,
+    });
   } catch (err) {
     console.error('reminder-check crashed', err);
     return Response.json({ error: err.message || 'Unknown error' }, { status: 500 });
   }
 }
 
-async function processReminders(now) {
-  const windowEnd = new Date(now.getTime() + REMINDER_MINUTES_BEFORE * 60 * 1000);
+// Handles one reminder tier (e.g. "30 minutes before" or "10 minutes
+// before"). Each trip is CLAIMED — atomically flipping its flag from
+// false to true — before any email is sent. If the claim doesn't
+// succeed (already claimed by a previous or concurrent run), we skip
+// it entirely. This guarantees a reminder can never be sent twice,
+// even if the run is retried or overlaps with another run.
+async function processReminderTier(now, minutesBefore, flagColumn) {
+  const windowEnd = new Date(now.getTime() + minutesBefore * 60 * 1000);
 
-  const { data: trips, error } = await supabaseAdmin
+  const { data: candidates, error } = await supabaseAdmin
     .from('trips')
-    .select(
-      `id, departure_time, reminder_sent, status,
-       driver:profiles!trips_driver_id_fkey ( email ),
-       destination_location:locations!trips_destination_location_id_fkey ( name ),
-       destination_location_custom,
-       reservations ( is_waitlisted, passenger:profiles!reservations_passenger_id_fkey ( email ) )`
-    )
-    .eq('reminder_sent', false)
+    .select('id')
+    .eq(flagColumn, false)
     .not('status', 'in', '("cancelled","departed")')
     .gt('departure_time', now.toISOString())
     .lte('departure_time', windowEnd.toISOString());
 
   if (error) {
-    console.error('processReminders query error', error);
+    console.error('processReminderTier query error', flagColumn, error);
     return 0;
   }
 
   let sentCount = 0;
 
-  for (const trip of trips) {
+  for (const candidate of candidates) {
     try {
+      const { data: claimed, error: claimError } = await supabaseAdmin
+        .from('trips')
+        .update({ [flagColumn]: true })
+        .eq('id', candidate.id)
+        .eq(flagColumn, false)
+        .select(
+          `id, departure_time,
+           driver:profiles!trips_driver_id_fkey ( email ),
+           destination_location:locations!trips_destination_location_id_fkey ( name ),
+           destination_location_custom,
+           reservations ( is_waitlisted, passenger:profiles!reservations_passenger_id_fkey ( email ) )`
+        )
+        .maybeSingle();
+
+      // No row came back = someone else already claimed this trip for
+      // this tier (or it briefly failed) — either way, don't send.
+      if (claimError || !claimed) continue;
+
       const destination =
-        trip.destination_location?.name === 'Other'
-          ? trip.destination_location_custom
-          : trip.destination_location?.name;
+        claimed.destination_location?.name === 'Other'
+          ? claimed.destination_location_custom
+          : claimed.destination_location?.name;
 
       const recipients = [
-        trip.driver?.email,
-        ...trip.reservations.filter((r) => !r.is_waitlisted).map((r) => r.passenger?.email),
+        claimed.driver?.email,
+        ...claimed.reservations.filter((r) => !r.is_waitlisted).map((r) => r.passenger?.email),
       ].filter(Boolean);
 
       const { subject, html } = buildEmail('departure_reminder', {
-        departureTime: trip.departure_time,
+        departureTime: claimed.departure_time,
         destination,
-        minutesBefore: REMINDER_MINUTES_BEFORE,
+        minutesBefore,
       });
 
       for (const to of new Set(recipients)) {
         await sendEmailSafe(to, subject, html);
       }
 
-      await supabaseAdmin.from('trips').update({ reminder_sent: true }).eq('id', trip.id);
       sentCount++;
     } catch (err) {
-      console.error('processReminders trip failed', trip.id, err);
-      // Skip this trip and keep going — don't let one bad trip block the rest.
+      console.error('processReminderTier trip failed', candidate.id, err);
     }
   }
 
@@ -119,29 +138,41 @@ const BUMP_WINDOW_MINUTES = 5;
 async function processNeededQueueBumps(now) {
   const windowEnd = new Date(now.getTime() + BUMP_WINDOW_MINUTES * 60 * 1000);
 
-  const { data: trips, error } = await supabaseAdmin
+  const { data: candidates, error } = await supabaseAdmin
     .from('trips')
-    .select(
-      `id, departure_time, seats_total, held_seat_email, needed_bump_processed, status,
-       destination_location:locations!trips_destination_location_id_fkey ( name ),
-       destination_location_custom,
-       reservations ( id, is_waitlisted, is_priority, created_at, passenger_id,
-         passenger:profiles!reservations_passenger_id_fkey ( email ) )`
-    )
+    .select('id')
     .eq('needed_bump_processed', false)
     .not('status', 'in', '("cancelled","departed")')
     .gt('departure_time', now.toISOString())
     .lte('departure_time', windowEnd.toISOString());
 
-  if (error || !trips) {
+  if (error || !candidates) {
     if (error) console.error('processNeededQueueBumps query error', error);
     return 0;
   }
 
   let bumped = 0;
 
-  for (const trip of trips) {
+  for (const candidate of candidates) {
     try {
+      // Claim this trip for bump processing first — if the claim doesn't
+      // land (already claimed by another run), skip it entirely.
+      const { data: trip, error: claimError } = await supabaseAdmin
+        .from('trips')
+        .update({ needed_bump_processed: true })
+        .eq('id', candidate.id)
+        .eq('needed_bump_processed', false)
+        .select(
+          `id, departure_time, seats_total, held_seat_email,
+           destination_location:locations!trips_destination_location_id_fkey ( name ),
+           destination_location_custom,
+           reservations ( id, is_waitlisted, is_priority, created_at, passenger_id,
+             passenger:profiles!reservations_passenger_id_fkey ( email ) )`
+        )
+        .maybeSingle();
+
+      if (claimError || !trip) continue;
+
       const queueDate = trip.departure_time.slice(0, 10); // YYYY-MM-DD
 
       const { data: queueRows } = await supabaseAdmin
@@ -154,8 +185,7 @@ async function processNeededQueueBumps(now) {
       const nextInLine = queueRows?.[0];
 
       if (!nextInLine) {
-        await supabaseAdmin.from('trips').update({ needed_bump_processed: true }).eq('id', trip.id);
-        continue;
+        continue; // already claimed above — nothing further to do
       }
 
       const confirmed = trip.reservations.filter((r) => !r.is_waitlisted);
@@ -180,7 +210,6 @@ async function processNeededQueueBumps(now) {
           // Everyone confirmed is protected (e.g. a single-seat car whose
           // only passenger is the priority pick) — nothing we can do for
           // this trip. Leave the queue entry for another car to resolve.
-          await supabaseAdmin.from('trips').update({ needed_bump_processed: true }).eq('id', trip.id);
           continue;
         }
 
@@ -202,7 +231,6 @@ async function processNeededQueueBumps(now) {
         is_waitlisted: false,
       });
       await supabaseAdmin.from('needed_queue').delete().eq('id', nextInLine.id);
-      await supabaseAdmin.from('trips').update({ needed_bump_processed: true }).eq('id', trip.id);
 
       if (nextInLine.profiles?.email) {
         const { subject, html } = buildEmail('needed_queue_seated', {
@@ -214,8 +242,7 @@ async function processNeededQueueBumps(now) {
 
       bumped++;
     } catch (err) {
-      console.error('processNeededQueueBumps trip failed', trip.id, err);
-      // Skip this trip and keep going — don't let one bad trip block the rest.
+      console.error('processNeededQueueBumps trip failed', candidate.id, err);
     }
   }
 
